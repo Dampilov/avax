@@ -1,0 +1,1 @@
+import "./set-whitelist-address"
