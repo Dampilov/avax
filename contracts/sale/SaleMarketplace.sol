@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.12;
 
-import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 import "./library/SafeERC20.sol";
-import "./library/SaleLibrary.sol";
 
 import "./interfaces/ISalesFactory.sol";
 import "./interfaces/ISale.sol";
@@ -14,7 +12,6 @@ import "./interfaces/ISale.sol";
  * @title Sale marketplace
  */
 contract SaleMarketplace is Ownable {
-    using SafeMath for uint256;
     using SafeERC20 for IERC20Decimals;
 
     /// @notice Sale factory address (editable)
@@ -62,7 +59,7 @@ contract SaleMarketplace is Ownable {
      * @param amount token amount
      */
     function deposit(address token, uint256 amount) external {
-        tokens[token][msg.sender] = tokens[token][msg.sender].add(amount);
+        tokens[token][msg.sender] = tokens[token][msg.sender] + amount;
 
         IERC20Decimals(token).safeTransferFrom(msg.sender, address(this), amount);
         emit Deposit(token, amount);
@@ -75,8 +72,8 @@ contract SaleMarketplace is Ownable {
      */
     function withdraw(address token, uint256 amount) external {
         uint256 addressAmount = tokens[token][msg.sender];
-        require(addressAmount.sub(amount) >= 0, "W1");
-        tokens[token][msg.sender] = addressAmount.sub(amount);
+        require(addressAmount - amount >= 0, "W1");
+        tokens[token][msg.sender] = addressAmount - amount;
 
         IERC20Decimals(token).transfer(msg.sender, amount);
         emit Withdraw(token, amount);
@@ -107,7 +104,7 @@ contract SaleMarketplace is Ownable {
         bytes32 hashId = keccak256(abi.encodePacked(msg.sender, _tradeNonce));
         _tradeNonce++;
 
-        tokens[saleAddress][msg.sender] = senderBalance.sub(iAVATAmount);
+        tokens[saleAddress][msg.sender] = senderBalance - iAVATAmount;
         trades[hashId] = Trade({owner: msg.sender, saleAddress: saleAddress, iAVATAmount: iAVATAmount, sellingAddress: sellingAddress, sellingAmount: sellingAmount, sold: false, soldTo: address(0x0)});
 
         emit Create(hashId, msg.sender, saleAddress, iAVATAmount, sellingAddress, sellingAmount);
@@ -122,7 +119,7 @@ contract SaleMarketplace is Ownable {
         Trade memory trade = trades[hashId];
         require(trade.owner == msg.sender, "C1");
 
-        tokens[trade.saleAddress][msg.sender] = tokens[trade.saleAddress][msg.sender].add(trade.iAVATAmount);
+        tokens[trade.saleAddress][msg.sender] = tokens[trade.saleAddress][msg.sender] + trade.iAVATAmount;
         delete trades[hashId];
 
         emit Cancel(hashId);
@@ -145,10 +142,10 @@ contract SaleMarketplace is Ownable {
         trades[hashId].sold = true;
         trades[hashId].soldTo = msg.sender;
 
-        tokens[trade.saleAddress][msg.sender] = tokens[trade.saleAddress][msg.sender].add(trade.iAVATAmount);
-        tokens[trade.sellingAddress][msg.sender] = tokens[trade.sellingAddress][msg.sender].sub(trade.sellingAmount);
+        tokens[trade.saleAddress][msg.sender] = tokens[trade.saleAddress][msg.sender] + trade.iAVATAmount;
+        tokens[trade.sellingAddress][msg.sender] = tokens[trade.sellingAddress][msg.sender] - trade.sellingAmount;
 
-        tokens[trade.sellingAddress][trade.owner] = tokens[trade.sellingAddress][trade.owner].add(trade.sellingAmount);
+        tokens[trade.sellingAddress][trade.owner] = tokens[trade.sellingAddress][trade.owner] + trade.sellingAmount;
 
         emit Buy(hashId, msg.sender, trade.owner);
     }
