@@ -3,16 +3,13 @@ pragma solidity 0.8.12;
 
 import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
-import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 import "./interfaces/IAdmin.sol";
 import "./interfaces/IDistribution.sol";
 
-contract AVAXStaking is OwnableUpgradeable {
-    using SafeMath for uint256;
+contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
     using SafeERC20Upgradeable for IERC20Upgradeable;
-    using ECDSA for bytes32;
 
     struct StakeRecord {
         uint256 id; // Stake id, NOT UNIQUE OVER ALL USERS, unique only among user's other stakes.
@@ -22,7 +19,6 @@ contract AVAXStaking is OwnableUpgradeable {
         uint256 tokensUnlockTime; // When stake tokens will unlock
     }
 
-    // Info of each user.
     struct UserInfo {
         uint256 totalAmount; // How many LP tokens the user has provided in all his stakes.
         uint256 totalRewarded; // How many tokens user got rewarded in total
@@ -31,145 +27,242 @@ contract AVAXStaking is OwnableUpgradeable {
         mapping(uint256 => StakeRecord) stakes; // Stake's id to the StakeRecord mapping
     }
 
-    // Info of each pool.
     struct PoolInfo {
-        IERC20Upgradeable lpToken; // Address of LP token contract.
+        IERC20Upgradeable depositToken; // Address of ERC20 deposit token contract.
         uint256 allocPoint; // How many allocation points assigned to this pool. ERC20s to distribute per block.
-        uint256 lastRewardTimestamp; // Last timstamp that ERC20s distribution occurs.
-        uint256 accERC20PerShare; // Accumulated ERC20s per share, times 1e36.
+        uint256 accTokenPerShare; // Accumulated ERC20s per share, times 1e36.
         uint256 totalDeposits; // Total amount of tokens deposited at the moment (staked)
-        uint256 emptyTimestamp; // When pool's totalDeposits became empty. Used for accounting of missed rewards, that weren't issued.
+        uint256 depositFeePercent; // Percent of deposit fee, must be >= depositFeePrecision / 100 and less than depositFeePrecision
+        uint256 depositFeeCollected; // Amount of the deposit fee collected and ready to claim by the owner
+        uint256 tokenBlockTime; // Token block time in seconds
         uint256 uniqueUsers; // How many unique users there are in the pool
     }
 
-    // State of the contract
-    enum ContractState {
-        Operating,
-        Halted
-    }
+    // Deposit fee precision for math calculations
+    uint256 public DEPOSIT_FEE_PRECISION;
 
-    // Time to relock the stake after it's unlock
-    uint256 public constant RELOCK_DAYS = 14;
+    // Acc reward per share precision in ^36
+    uint256 public ACC_REWARD_PER_SHARE_PRECISION;
 
-    // Address of the ERC20 Token contract.
-    IERC20Upgradeable public erc20;
-    // Distribution contract address who can mint tokens
-    IDistribution public distribution;
-    // The total amount of ERC20 that's paid out as reward.
+    // WAVAX address
+    IERC20Upgradeable public wavax;
+
+    // Last reward balance of WAVAX tokens
+    uint256 public lastRewardBalance;
+
+    // The total amount of ERC20 that's paid out as reward
     uint256 public paidOut;
-    // Total rewards not issued caused by empty pools
-    uint256 public missedRewards;
-    // Total amount of missed rewards tokens minted
-    uint256 public missedRewardsMinted;
-    // Precision of deposit fee
-    uint256 public depositFeePrecision;
-    // Percent of deposit fee, must be >= depositFeePrecision.div(100) and less than depositFeePrecision
-    uint256 public depositFeePercent;
-    // Share of the deposit fee, that will go to the staking pool in percents
-    uint256 public depositFeePoolSharePercent;
-    // Amount of the deposit fee collected and ready to claim by the owner
-    uint256 public depositFeeCollected;
-    // Total AVAT redistributed between people staking
-    uint256 public totalAvatRedistributed;
+
     // Info of each pool.
     PoolInfo[] public poolInfo;
+
     // Info of each user that stakes LP tokens.
     mapping(uint256 => mapping(address => UserInfo)) public userInfo;
+
     // Total allocation points. Must be the sum of all allocation points in all pools.
     uint256 public totalAllocPoint;
-    // The timestamp when staking starts.
-    uint256 public startTimestamp;
-    // Total amount of tokens burned from the wallet
-    mapping(address => uint256) public totalBurnedFromUser;
-    // Time when withdraw is allowed after the stake unlocks
-    uint256 public withdrawAllowedDays;
-    // Admin contract
-    IAdmin public admin;
-    // Contract state
-    ContractState public contractState;
 
-    // Events
     event Deposit(address indexed user, uint256 indexed pid, uint256 indexed stakeIndex, uint256 amount);
     event Withdraw(address indexed user, uint256 indexed pid, uint256 indexed stakeIndex, uint256 withdrawAmount, uint256 rewardAmount);
-    event Rewards(address indexed user, uint256 indexed pid, uint256 indexed stakeIndex, uint256 amount);
-    event Restake(address indexed user, uint256 indexed pid, uint256 indexed stakeIndex, uint256 unlockTime);
-    event DepositFeeSet(uint256 depositFeePercent, uint256 depositFeePrecision);
-    event CompoundedEarnings(address indexed user, uint256 indexed pid, uint256 indexed stakeIndex, uint256 amountAdded, uint256 totalDeposited);
-    event FeeTaken(address indexed user, uint256 indexed pid, uint256 amount, uint256 poolShare);
-    event EmergencyMint(address indexed recipient, uint256 amount);
-
-    // Call can be processed only when the contract is in operating state
-    modifier onlyOperating() {
-        require(contractState == ContractState.Operating, "Contract is not operating currently");
-        _;
-    }
+    event Collect(address indexed user, uint256 indexed pid, uint256 indexed stakeIndex, uint256 amount);
+    event SetDepositFee(uint256 depositFeePercent);
+    event ClaimCollectedFees(uint amount);
 
     function initialize(
-        IERC20Upgradeable _erc20,
-        IDistribution _distribution,
-        uint256 _startTimestamp,
-        uint256 _depositFeePercent,
-        uint256 _depositFeePrecision,
-        uint256 _depositFeePoolSharePercent,
-        uint256 _withdrawAllowedDays
+        IERC20Upgradeable _wavax,
+        uint _depositFeePrecision
     ) public initializer {
         __Ownable_init();
+        __Pausable_init();
 
-        erc20 = _erc20;
-        distribution = _distribution;
+        ACC_REWARD_PER_SHARE_PRECISION = 1e36;
 
-        startTimestamp = _startTimestamp;
-        contractState = ContractState.Operating;
+        require(_depositFeePrecision >= 100, "I0");
+        DEPOSIT_FEE_PRECISION = _depositFeePrecision;
 
-        setDepositFeeInternal(_depositFeePercent, _depositFeePrecision);
-        depositFeePoolSharePercent = _depositFeePoolSharePercent;
-
-        withdrawAllowedDays = _withdrawAllowedDays;
+        require(address(_wavax)  != address(0x0), "I1");
+        wavax = _wavax;
     }
 
-    // Number of LP pools
-    function poolLength() external view returns (uint256) {
-        return poolInfo.length;
-    }
-
-    // Add a new lp to the pool. Can only be called by the owner.
-    // DO NOT add the same LP token more than once. Rewards will be messed up if you do.
+    /**
+     * @notice Add a new pool. Can only be called by the owner.
+     * @dev DO NOT add the same LP token more than once. Rewards will be messed up if you do.
+     */
     function add(
+        IERC20Upgradeable _depositToken,
         uint256 _allocPoint,
-        IERC20Upgradeable _lpToken,
+        uint256 _depositFeePercent,
+        uint256 _tokenBlockTime,
         bool _withUpdate
     ) public onlyOwner {
-        require(poolInfo.length > 0 || _lpToken == erc20, "First pool's lp token must be a reward token");
         if (_withUpdate) {
             massUpdatePools();
         }
-        uint256 lastRewardTimestamp = block.timestamp > startTimestamp ? block.timestamp : startTimestamp;
-        totalAllocPoint = totalAllocPoint.add(_allocPoint);
-        // Push new PoolInfo
-        poolInfo.push(PoolInfo({lpToken: _lpToken, allocPoint: _allocPoint, lastRewardTimestamp: lastRewardTimestamp, accERC20PerShare: 0, totalDeposits: 0, emptyTimestamp: lastRewardTimestamp, uniqueUsers: 0}));
+
+        totalAllocPoint = totalAllocPoint + _allocPoint;
+        poolInfo.push(PoolInfo({depositToken: _depositToken, allocPoint: _allocPoint, accTokenPerShare: 0, totalDeposits: 0, uniqueUsers: 0, depositFeePercent: _depositFeePercent, depositFeeCollected: 0, tokenBlockTime: _tokenBlockTime}));
     }
 
-    // Set deposit fee
-    function setDepositFee(uint256 _depositFeePercent, uint256 _depositFeePrecision) public onlyOwner {
-        setDepositFeeInternal(_depositFeePercent, _depositFeePrecision);
+    /**
+     * @notice Deposit tokens
+     */
+    function deposit(
+        uint256 _pid,
+        uint256 _amount
+    ) public whenNotPaused {
+        require(_amount > 0, "D0");
+        require(_pid < poolInfo.length, "D1");
+
+        PoolInfo storage pool = poolInfo[_pid];
+        UserInfo storage user = userInfo[_pid][msg.sender];
+
+        uint256 depositAmount = _amount;
+
+        uint256 depositFee = _amount * pool.depositFeePercent / DEPOSIT_FEE_PRECISION;
+        depositAmount = _amount - depositFee;
+
+        pool.depositFeeCollected = pool.depositFeeCollected + depositAmount;
+
+        // Update pool including fee for people staking
+        updatePool(_pid);
+        
+        // Add deposit to total deposits
+        pool.totalDeposits = pool.totalDeposits + depositAmount;
+
+        // Increment if this is a new user of the pool
+        if (user.stakesCount == 0) {
+            pool.uniqueUsers = pool.uniqueUsers + 1;
+        }
+
+        // Initialize a new stake record
+        uint256 stakeId = user.stakesCount;
+        require(user.stakes[stakeId].id == 0, "D2");
+
+        StakeRecord storage stake = user.stakes[stakeId];
+        // Set stake id
+        stake.id = stakeId;
+        // Set stake index in the user.stakeIds array
+        stake.index = user.stakeIds.length;
+        // Add deposit to user's amount
+        stake.amount = depositAmount;
+        // Update user's total amount
+        user.totalAmount = user.totalAmount + depositAmount;
+        // Compute reward debt
+        stake.rewardDebt = stake.amount * pool.accTokenPerShare / ACC_REWARD_PER_SHARE_PRECISION;
+        // Set lockup time
+        stake.tokensUnlockTime = block.timestamp + pool.tokenBlockTime;
+
+        // Push user's stake id
+        user.stakeIds.push(stakeId);
+        // Increase users's overall stakes count
+        user.stakesCount = user.stakesCount + 1;
+
+        // Safe transfer deposit tokens from user
+        pool.depositToken.safeTransferFrom(address(msg.sender), address(this), _amount);
+        emit Deposit(msg.sender, _pid, stake.id, depositAmount);
     }
 
-    // Set deposit fee internal
-    function setDepositFeeInternal(uint256 _depositFeePercent, uint256 _depositFeePrecision) internal {
-        require(_depositFeePercent >= _depositFeePrecision.div(100) && _depositFeePercent <= _depositFeePrecision);
-        depositFeePercent = _depositFeePercent;
-        depositFeePrecision = _depositFeePrecision;
-        emit DepositFeeSet(depositFeePercent, depositFeePrecision);
+    /**
+     * @notice Withdraw deposit tokens and collect staking rewards in WAVAX from pool
+     */
+    function withdraw(uint256 _pid, uint256 _stakeId) public whenNotPaused {
+        PoolInfo storage pool = poolInfo[_pid];
+        UserInfo storage user = userInfo[_pid][msg.sender];
+
+        StakeRecord storage stake = user.stakes[_stakeId];
+        uint256 amount = stake.amount;
+
+        require(stake.tokensUnlockTime <= block.timestamp, "W0");
+        require(amount > 0, "W1");
+
+        // Update pool
+        updatePool(_pid);
+
+        // Compute user's pending amount
+        uint256 pendingAmount = stake.amount * pool.accTokenPerShare / ACC_REWARD_PER_SHARE_PRECISION - stake.rewardDebt;
+
+        // Transfer pending amount to user
+        _safeTransferReward(msg.sender, pendingAmount);
+        user.totalRewarded = user.totalRewarded + pendingAmount;
+        user.totalAmount = user.totalAmount - amount;
+
+        stake.amount = 0;
+        stake.rewardDebt = stake.amount * pool.accTokenPerShare / ACC_REWARD_PER_SHARE_PRECISION;
+
+        // Transfer withdrawal amount to user (with fee being withdrawalFeeDepositAmount)
+        pool.depositToken.safeTransfer(address(msg.sender), amount);
+        pool.totalDeposits = pool.totalDeposits - amount;
+
+        // Clean stake data since it's always a full withdraw
+        {
+            uint256 lastStakeId = user.stakeIds[user.stakeIds.length - 1];
+
+            user.stakeIds[stake.index] = lastStakeId;
+            user.stakeIds.pop();
+            user.stakes[lastStakeId].index = stake.index;
+
+            delete user.stakes[stake.id];
+        }
+
+        emit Withdraw(msg.sender, _pid, _stakeId, amount, pendingAmount);
     }
 
-    // Claim all collected fees and send them to the recipient. Can only be called by the owner.
-    function claimCollectedFees(address _recipient) external onlyOwner {
-        require(depositFeeCollected > 0, "Zero fees to collect");
-        erc20.transfer(_recipient, depositFeeCollected);
-        depositFeeCollected = 0;
+    /**
+     * @notice Collect staking rewards in WAVAX
+     */
+    function collect(uint256 _pid, uint256 _stakeId) public whenNotPaused {
+        PoolInfo storage pool = poolInfo[_pid];
+        UserInfo storage user = userInfo[_pid][msg.sender];
+
+        StakeRecord storage stake = user.stakes[_stakeId];
+        require(stake.amount > 0, "C0");
+
+        // Update pool
+        updatePool(_pid);
+
+        // Compute user's pending amount
+        uint256 pendingAmount = stake.amount * pool.accTokenPerShare / ACC_REWARD_PER_SHARE_PRECISION - stake.rewardDebt;
+
+        // Transfer pending amount to user
+        _safeTransferReward(msg.sender, pendingAmount);
+        user.totalRewarded = user.totalRewarded + pendingAmount;
+        stake.rewardDebt = stake.amount * pool.accTokenPerShare / ACC_REWARD_PER_SHARE_PRECISION;
+
+        emit Collect(msg.sender, _pid, _stakeId, pendingAmount);
     }
 
-    // Update the given pool's ERC20 allocation point. Can only be called by the owner. Always prefer to call with _withUpdate set to true.
+    /**
+     * @notice Set deposit fee for particular pool
+     */
+    function setDepositFee(uint256 _pid, uint256 _depositFeePercent) external onlyOwner {
+        PoolInfo storage pool = poolInfo[_pid];
+
+        require(_depositFeePercent <= DEPOSIT_FEE_PRECISION);
+        pool.depositFeePercent = _depositFeePercent;
+
+        emit SetDepositFee(_depositFeePercent);
+    }
+
+    /**
+     * @notice Claim all collected fees and send them to the recipient. Can only be called by the owner.
+     * 
+     * @param _pid pool id
+     * @param _recipient address which receives collected fees
+     */
+    function claimCollectedFees(uint256 _pid, address _recipient) external onlyOwner {
+        PoolInfo storage pool = poolInfo[_pid];
+
+        uint amountToCollect = pool.depositFeeCollected;
+        pool.depositFeeCollected = 0;
+        
+        pool.depositToken.transfer(_recipient, amountToCollect);
+        emit ClaimCollectedFees(amountToCollect);
+    }
+
+    /**
+     * @notice Update the given pool's ERC20 allocation point. Can only be called by the owner. 
+     * Always prefer to call with _withUpdate set to true.
+     */
     function setAllocation(
         uint256 _pid,
         uint256 _allocPoint,
@@ -178,22 +271,28 @@ contract AVAXStaking is OwnableUpgradeable {
         if (_withUpdate) {
             massUpdatePools();
         }
-        totalAllocPoint = totalAllocPoint.sub(poolInfo[_pid].allocPoint).add(_allocPoint);
+        totalAllocPoint = totalAllocPoint - poolInfo[_pid].allocPoint + _allocPoint;
         poolInfo[_pid].allocPoint = _allocPoint;
     }
 
-    // Sets new ERC20 minter address
-    function setDistribution(IDistribution _distribution) public onlyOwner {
-        distribution = _distribution;
-    }
-
-    // Get user's stakes count
+    /**
+     * @notice Get user's stakes count
+     */
     function userStakesCount(uint256 _pid, address _user) public view returns (uint256) {
         UserInfo storage user = userInfo[_pid][_user];
         return user.stakeIds.length;
     }
 
-    // Return user's stakes array
+    /**
+     * @notice Get pool info
+     */
+    function getPool(uint256 _pid) public view returns (PoolInfo memory) {
+        return poolInfo[_pid];
+    }
+
+    /**
+     * @notice Return user's stakes array
+     */
     function getUserStakes(uint256 _pid, address _user) public view returns (StakeRecord[] memory stakeArray) {
         UserInfo storage user = userInfo[_pid][_user];
         stakeArray = new StakeRecord[](user.stakeIds.length);
@@ -202,7 +301,9 @@ contract AVAXStaking is OwnableUpgradeable {
         }
     }
 
-    // Return user's specific stake
+    /**
+     * @notice Return user's specific stake
+     */
     function getUserStake(
         uint256 _pid,
         address _user,
@@ -213,13 +314,17 @@ contract AVAXStaking is OwnableUpgradeable {
         return user.stakes[_stakeId];
     }
 
-    // Return user's stake ids array
+    /**
+     * @notice Return user's stake ids array
+     */
     function getUserStakeIds(uint256 _pid, address _user) public view returns (uint256[] memory) {
         UserInfo storage user = userInfo[_pid][_user];
         return user.stakeIds;
     }
 
-    // View function to see deposited LP for a particular user's stake.
+    /**
+     * @notice View function to see deposited tokens for a particular user's stake.
+     */
     function deposited(
         uint256 _pid,
         address _user,
@@ -237,7 +342,9 @@ contract AVAXStaking is OwnableUpgradeable {
         return user.totalAmount;
     }
 
-    // View function to see pending ERC20s for a user's stake.
+    /**
+     * @notice View function to see pending rewards for a user's stake.
+     */
     function pending(
         uint256 _pid,
         address _user,
@@ -247,39 +354,45 @@ contract AVAXStaking is OwnableUpgradeable {
         UserInfo storage user = userInfo[_pid][_user];
 
         StakeRecord storage stake = user.stakes[_stakeId];
-        require(stake.id == _stakeId, "Stake with this id does not exist");
+        require(stake.id == _stakeId, "P0");
 
-        uint256 accERC20PerShare = pool.accERC20PerShare;
-        uint256 lpSupply = pool.totalDeposits;
+        uint256 depositTokenSupply = pool.totalDeposits;
+        uint256 currentRewardBalance = wavax.balanceOf(address(this));
 
-        // Compute pending ERC20s
-        if (block.timestamp > pool.lastRewardTimestamp && lpSupply != 0) {
-            uint256 totalReward = distribution.countRewardAmount(pool.lastRewardTimestamp, block.timestamp);
-            uint256 poolReward = totalReward.mul(pool.allocPoint).div(totalAllocPoint);
-            accERC20PerShare = accERC20PerShare.add(poolReward.mul(1e36).div(lpSupply));
+        uint256 _accTokenPerShare = pool.accTokenPerShare;
+
+        if (currentRewardBalance != lastRewardBalance && depositTokenSupply != 0) {
+            uint256 _accruedReward = currentRewardBalance - lastRewardBalance;
+            _accTokenPerShare = _accTokenPerShare + 
+                _accruedReward * pool.allocPoint / totalAllocPoint * ACC_REWARD_PER_SHARE_PRECISION / depositTokenSupply;
         }
-        return stake.amount.mul(accERC20PerShare).div(1e36).sub(stake.rewardDebt);
+
+        return stake.amount * _accTokenPerShare / ACC_REWARD_PER_SHARE_PRECISION - stake.rewardDebt;
     }
 
-    // View function to see total pending ERC20s for a user.
+    /**
+     * @notice Number of pools
+     */
+    function poolLength() external view returns (uint256) {
+        return poolInfo.length;
+    }
+
+    /**
+     * @notice Number of pools
+     */
     function totalPending(uint256 _pid, address _user) public view returns (uint256) {
         UserInfo storage user = userInfo[_pid][_user];
 
         uint256 pendingAmount = 0;
         for (uint256 i = 0; i < user.stakeIds.length; i++) {
-            pendingAmount = pendingAmount.add(pending(_pid, _user, user.stakeIds[i]));
+            pendingAmount = pendingAmount + pending(_pid, _user, user.stakeIds[i]);
         }
         return pendingAmount;
     }
 
-    // Calculate pool's estimated APR. Returns APR in percents * 100.
-    function getPoolAPR(uint256 _pid) external view returns (uint256) {
-        PoolInfo storage pool = poolInfo[_pid];
-        uint256 reward = distribution.countRewardAmount(block.timestamp, block.timestamp.add(365 days));
-        return reward.mul(pool.allocPoint).div(totalAllocPoint).mul(1e4).div(pool.totalDeposits);
-    }
-
-    // Update reward variables for all pools. Be careful of gas spending!
+    /**
+     * @notice Update reward variables for all pools. Be careful of gas spending!
+     */
     function massUpdatePools() public {
         uint256 length = poolInfo.length;
         for (uint256 pid = 0; pid < length; ++pid) {
@@ -287,252 +400,48 @@ contract AVAXStaking is OwnableUpgradeable {
         }
     }
 
-    // Update reward variables of the given pool to be up-to-date.
-    function updatePool(uint256 _pid) public {
-        updatePoolWithFee(_pid, 0);
-    }
-
-    // Function to update pool with fee to redistribute amount between other stakers
-    function updatePoolWithFee(uint256 _pid, uint256 _depositFee) internal {
+    /**
+     * @notice Update pool rewards. Needs to be called before any deposit or withdrawal
+     *
+     * @param _pid pool id
+     */
+    function updatePool(uint256 _pid) internal {
         PoolInfo storage pool = poolInfo[_pid];
-        uint256 lastTimestamp = block.timestamp;
 
-        if (lastTimestamp <= pool.lastRewardTimestamp) {
-            lastTimestamp = pool.lastRewardTimestamp;
-        }
+        uint256 depositTokenSupply = pool.totalDeposits;
+        uint256 currentRewardBalance = wavax.balanceOf(address(this));
 
-        uint256 lpSupply = pool.totalDeposits;
-
-        if (lpSupply == 0) {
-            pool.lastRewardTimestamp = lastTimestamp;
-
-            if (lastTimestamp > startTimestamp) {
-                uint256 contractMissed = distribution.countRewardAmount(pool.emptyTimestamp, block.timestamp);
-                missedRewards = missedRewards.add(contractMissed.mul(pool.allocPoint).div(totalAllocPoint));
-                pool.emptyTimestamp = lastTimestamp;
-            }
-
+        if (depositTokenSupply == 0 || currentRewardBalance == lastRewardBalance) {
             return;
         }
-        // Add to the reward fee taken, and distribute to all users staking at the moment.
-        uint256 reward = distribution.countRewardAmount(pool.lastRewardTimestamp, lastTimestamp);
-        uint256 erc20Reward = reward.mul(pool.allocPoint).div(totalAllocPoint).add(_depositFee);
 
-        pool.accERC20PerShare = pool.accERC20PerShare.add(erc20Reward.mul(1e36).div(lpSupply));
+        uint256 _accruedReward = currentRewardBalance - lastRewardBalance;
 
-        pool.lastRewardTimestamp = lastTimestamp;
+        pool.accTokenPerShare = pool.accTokenPerShare + 
+            _accruedReward * pool.allocPoint / totalAllocPoint * ACC_REWARD_PER_SHARE_PRECISION / depositTokenSupply;
+
+        lastRewardBalance = currentRewardBalance;
     }
 
-    // Check if it's the withdrawAllowedDays time window
-    function isWithdrawAllowedTime(uint256 tokensUnlockTime) internal view returns (bool) {
-        uint256 relockEpochTime = withdrawAllowedDays.add(RELOCK_DAYS).mul(1 days);
-        uint256 timeSinceUnlock = block.timestamp.sub(tokensUnlockTime);
-        return timeSinceUnlock.mod(relockEpochTime) < withdrawAllowedDays.mul(1 days);
-    }
+    /**
+     * @notice Transfer rewards and update lastRewardBalance
+     *
+     * @param _to user address
+     * @param _amount pending reward amount
+     */
+    function _safeTransferReward(address _to, uint256 _amount) internal {
+        uint256 wavaxBalance = wavax.balanceOf(address(this));
 
-    // Deposit LP tokens to stake for ERC20 allocation.
-    function deposit(
-        uint256 _pid,
-        uint256 _amount,
-        uint256 stakeDays
-    ) public onlyOperating {
-        require(_amount > 0, "Should deposit positive amount");
-        require(_pid < poolInfo.length, "Pool with such id does not exist");
+        if (_amount > wavaxBalance) {
+            lastRewardBalance = lastRewardBalance - wavaxBalance;
+            paidOut += wavaxBalance;
 
-        PoolInfo storage pool = poolInfo[_pid];
-        UserInfo storage user = userInfo[_pid][msg.sender];
+            wavax.safeTransfer(_to, wavaxBalance);
+        } else {
+            lastRewardBalance = lastRewardBalance - wavaxBalance;
+            paidOut += _amount;
 
-        uint256 depositAmount = _amount;
-        uint256 feePoolShare = 0;
-
-        // Only for the main pool take fees
-        if (_pid == 0) {
-            uint256 depositFee = _amount.mul(depositFeePercent).div(depositFeePrecision);
-            depositAmount = _amount.sub(depositFee);
-
-            feePoolShare = depositFee.mul(depositFeePoolSharePercent).div(100);
-            depositFeeCollected = depositFeeCollected.add(depositFee.sub(feePoolShare));
-            // Update accounting around burning
-            burnFromUser(msg.sender, feePoolShare);
-            emit FeeTaken(msg.sender, _pid, depositFee, feePoolShare);
+            wavax.safeTransfer(_to, _amount);
         }
-
-        // Update pool including fee for people staking
-        updatePoolWithFee(_pid, feePoolShare);
-
-        // Safe transfer lpToken from user
-        pool.lpToken.safeTransferFrom(address(msg.sender), address(this), _amount);
-        // Add deposit to total deposits
-        pool.totalDeposits = pool.totalDeposits.add(depositAmount);
-
-        if (pool.totalDeposits > 0) {
-            // we are not updating missedRewards here because it must've been done in the updatePoolWithFee
-            pool.emptyTimestamp = 0;
-        }
-
-        // Increment if this is a new user of the pool
-        if (user.stakesCount == 0) {
-            pool.uniqueUsers = pool.uniqueUsers.add(1);
-        }
-
-        // Initialize a new stake record
-        uint256 stakeId = user.stakesCount;
-        require(user.stakes[stakeId].id == 0, "New stake record is not empty");
-
-        StakeRecord storage stake = user.stakes[stakeId];
-        // Set stake id
-        stake.id = stakeId;
-        // Set stake index in the user.stakeIds array
-        stake.index = user.stakeIds.length;
-        // Add deposit to user's amount
-        stake.amount = depositAmount;
-        // Update user's total amount
-        user.totalAmount = user.totalAmount.add(depositAmount);
-        // Compute reward debt
-        stake.rewardDebt = stake.amount.mul(pool.accERC20PerShare).div(1e36);
-        // Set lockup time
-        stake.tokensUnlockTime = block.timestamp.add(stakeDays.mul(1 days));
-
-        // Push user's stake id
-        user.stakeIds.push(stakeId);
-        // Increase users's overall stakes count
-        user.stakesCount = user.stakesCount.add(1);
-
-        // Emit relevant event
-        emit Deposit(msg.sender, _pid, stake.id, depositAmount);
-    }
-
-    // Withdraw LP tokens from pool.
-    function withdraw(uint256 _pid, uint256 _stakeId) public onlyOperating {
-        PoolInfo storage pool = poolInfo[_pid];
-        UserInfo storage user = userInfo[_pid][msg.sender];
-
-        StakeRecord storage stake = user.stakes[_stakeId];
-        uint256 amount = stake.amount;
-
-        require(stake.tokensUnlockTime <= block.timestamp, "Stake is not unlocked yet.");
-        require(amount > 0, "Can't withdraw without an existing stake");
-
-        // Withdraw can be called only for withdrawAllowedDays after the unlock and relocks for RELOCK_DAYS after.
-        require(isWithdrawAllowedTime(stake.tokensUnlockTime), "Can only withdraw during the allowed time window after the unlock");
-
-        // Update pool
-        updatePool(_pid);
-
-        // Compute user's pending amount
-        uint256 pendingAmount = stake.amount.mul(pool.accERC20PerShare).div(1e36).sub(stake.rewardDebt);
-
-        // Transfer pending amount to user
-        erc20MintAndTransfer(msg.sender, pendingAmount);
-        user.totalRewarded = user.totalRewarded.add(pendingAmount);
-        user.totalAmount = user.totalAmount.sub(amount);
-
-        stake.amount = 0;
-        stake.rewardDebt = stake.amount.mul(pool.accERC20PerShare).div(1e36);
-
-        // Transfer withdrawal amount to user (with fee being withdrawalFeeDepositAmount)
-        pool.lpToken.safeTransfer(address(msg.sender), amount);
-        pool.totalDeposits = pool.totalDeposits.sub(amount);
-
-        if (pool.totalDeposits == 0 && block.timestamp > startTimestamp) {
-            pool.emptyTimestamp = block.timestamp;
-        }
-
-        // Clean stake data since it's always a full withdraw
-        {
-            uint256 lastStakeId = user.stakeIds[user.stakeIds.length - 1];
-
-            user.stakeIds[stake.index] = lastStakeId;
-            user.stakeIds.pop();
-            user.stakes[lastStakeId].index = stake.index;
-
-            delete user.stakes[stake.id];
-        }
-
-        emit Withdraw(msg.sender, _pid, _stakeId, amount, pendingAmount);
-    }
-
-    // Collect staking rewards
-    function collect(uint256 _pid, uint256 _stakeId) public onlyOperating {
-        PoolInfo storage pool = poolInfo[_pid];
-        UserInfo storage user = userInfo[_pid][msg.sender];
-
-        StakeRecord storage stake = user.stakes[_stakeId];
-        require(stake.amount > 0, "Can't withdraw without an existing stake");
-
-        // Update pool
-        updatePool(_pid);
-
-        // Compute user's pending amount
-        uint256 pendingAmount = stake.amount.mul(pool.accERC20PerShare).div(1e36).sub(stake.rewardDebt);
-
-        // Transfer pending amount to user
-        erc20MintAndTransfer(msg.sender, pendingAmount);
-        user.totalRewarded = user.totalRewarded.add(pendingAmount);
-        stake.rewardDebt = stake.amount.mul(pool.accERC20PerShare).div(1e36);
-
-        emit Rewards(msg.sender, _pid, _stakeId, pendingAmount);
-    }
-
-    // Transfer ERC20 and update the required ERC20 to payout all rewards
-    function erc20MintAndTransfer(address _to, uint256 _amount) internal {
-        uint256 erc20Balance = erc20.balanceOf(address(this)).sub(depositFeeCollected).sub(poolInfo[0].totalDeposits);
-        if (_amount > erc20Balance) {
-            distribution.mintTokens(address(this), _amount.sub(erc20Balance));
-        }
-        erc20.transfer(_to, _amount);
-        paidOut += _amount;
-    }
-
-    // Internal function to burn amount from user and do accounting
-    function burnFromUser(address user, uint256 amount) internal {
-        totalBurnedFromUser[user] = totalBurnedFromUser[user].add(amount);
-        totalAvatRedistributed = totalAvatRedistributed.add(amount);
-    }
-
-    // Function to fetch deposits and earnings at one call for multiple users for passed pool id.
-    function getTotalPendingAndDepositedForUsers(address[] memory users, uint256 pid) external view returns (uint256[] memory, uint256[] memory) {
-        uint256[] memory deposits = new uint256[](users.length);
-        uint256[] memory earnings = new uint256[](users.length);
-
-        // Get deposits and earnings for selected users
-        for (uint256 i = 0; i < users.length; i++) {
-            UserInfo storage user = userInfo[pid][users[i]];
-
-            deposits[i] = totalDeposited(pid, users[i]);
-            // Sum for all user's stakes
-            for (uint256 j = 0; j < user.stakeIds.length; j++) {
-                earnings[i] = earnings[i].add(pending(pid, users[i], user.stakeIds[j]));
-            }
-        }
-
-        return (deposits, earnings);
-    }
-
-    // Mint reward that was not paid out when pool was empty
-    function emergencyMint(address _recipient) external onlyOwner {
-        uint256 amount = missedRewards.sub(missedRewardsMinted);
-        require(amount > 0, "There are no missed rewards for minting");
-
-        distribution.mintTokens(_recipient, amount);
-        missedRewardsMinted = missedRewardsMinted.add(amount);
-
-        emit EmergencyMint(_recipient, amount);
-    }
-
-    // Function to set admin contract by owner
-    function setAdmin(address _admin) external onlyOwner {
-        require(_admin != address(0), "Cannot set zero address as admin.");
-        admin = IAdmin(_admin);
-    }
-
-    // Halt contract's operations
-    function halt() external onlyOwner {
-        contractState = ContractState.Halted;
-    }
-
-    // Resume contract's operation
-    function resume() external onlyOwner {
-        contractState = ContractState.Operating;
     }
 }
