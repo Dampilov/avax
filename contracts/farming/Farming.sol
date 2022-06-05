@@ -4,11 +4,12 @@ pragma solidity 0.8.12;
 import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
 import "./interfaces/IFarmingFactory.sol";
 
-contract Farming is OwnableUpgradeable {
+contract Farming is OwnableUpgradeable, ReentrancyGuard {
     using SafeMath for uint256;
     using SafeERC20Upgradeable for IERC20Upgradeable;
 
@@ -35,7 +36,7 @@ contract Farming is OwnableUpgradeable {
 
     /* POOL INFO */
 
-    /// @notice Last timestamp that AVAT distribution occurs.
+    /// @notice Last timestamp that AVAT distribution occurs
     uint256 public lastRewardTimestamp;
 
     /// @notice Accumulated AVAT tokens per share
@@ -53,7 +54,10 @@ contract Farming is OwnableUpgradeable {
     mapping(address => UserInfo) public userInfo;
 
     /// @notice Accumulated token per share precision
-    uint256 public ATPS_PRECISION;
+    uint256 public constant ATPS_PRECISION = 1e36;
+
+    /// @notice Fee percent equals 0.5%
+    uint256 public constant REWARDS_FEE = 995; 
 
     event Deposit(address indexed user, uint256 amount);
     event Withdraw(address indexed user, uint256 amount);
@@ -92,8 +96,6 @@ contract Farming is OwnableUpgradeable {
 
         bonusTokenPerSec = bonusTokenPerSec_;
         lastRewardTimestamp = block.timestamp > startTimestamp_ ? block.timestamp : startTimestamp_;
-
-        ATPS_PRECISION = 1e36;
     }
 
     /**
@@ -134,16 +136,21 @@ contract Farming is OwnableUpgradeable {
      *
      * @param _amount amount of LP tokens
      */
-    function deposit(uint256 _amount) public {
+    function deposit(uint256 _amount) external nonReentrant {
         UserInfo storage user = userInfo[msg.sender];
 
         updatePool();
 
-        if (user.amount > 0) {
-            _harvest();
+        // gas saving
+        uint _userAmount = user.amount;
+
+        if (_userAmount > 0) {
+            uint256 pendingAvat = _userAmount.mul(accAvatTokenPerShare).div(ATPS_PRECISION).sub(user.rewardAvatTokenDebt);
+            uint256 pendingBonus = _userAmount.mul(accBonusTokenPerShare).div(ATPS_PRECISION).sub(user.rewardBonusTokenDebt);
+            _harvest(pendingAvat, pendingBonus);
         }
 
-        user.amount = user.amount.add(_amount);
+        user.amount = _userAmount.add(_amount);
         user.rewardAvatTokenDebt = user.amount.mul(accAvatTokenPerShare).div(ATPS_PRECISION);
         user.rewardBonusTokenDebt = user.amount.mul(accBonusTokenPerShare).div(ATPS_PRECISION);
 
@@ -156,14 +163,20 @@ contract Farming is OwnableUpgradeable {
      *
      * @param _amount amount of LP tokens
      */
-    function withdraw(uint256 _amount) public {
+    function withdraw(uint256 _amount) external nonReentrant {
         UserInfo storage user = userInfo[msg.sender];
-        require(user.amount >= _amount, "W0");
+
+        // gas saving
+        uint _userAmount = user.amount;
+        require(_userAmount >= _amount, "W0");
 
         updatePool();
-        _harvest();
 
-        user.amount = user.amount.sub(_amount);
+        uint256 pendingAvat = _userAmount.mul(accAvatTokenPerShare).div(ATPS_PRECISION).sub(user.rewardAvatTokenDebt);
+        uint256 pendingBonus = _userAmount.mul(accBonusTokenPerShare).div(ATPS_PRECISION).sub(user.rewardBonusTokenDebt);
+        _harvest(pendingAvat, pendingBonus);
+
+        user.amount = _userAmount.sub(_amount);
         user.rewardAvatTokenDebt = user.amount.mul(accAvatTokenPerShare).div(ATPS_PRECISION);
         user.rewardBonusTokenDebt = user.amount.mul(accBonusTokenPerShare).div(ATPS_PRECISION);
 
@@ -174,7 +187,7 @@ contract Farming is OwnableUpgradeable {
     /**
      * @notice Withdraw without caring about rewards. EMERGENCY ONLY.
      */
-    function emergencyWithdraw() public {
+    function emergencyWithdraw() external nonReentrant {
         UserInfo storage user = userInfo[msg.sender];
 
         lpToken.safeTransfer(address(msg.sender), user.amount);
@@ -187,13 +200,14 @@ contract Farming is OwnableUpgradeable {
     }
 
     /**
-     * @notice Harvest AVAT and/or Bonus rewards
+     * @notice Harvest AVAT and/or Bonus rewards and take fee
      */
-    function _harvest() internal {
-        (uint256 pendingAvat, uint256 pendingBonus) = pending(msg.sender);
-
+    function _harvest(uint256 pendingAvat, uint256 pendingBonus) internal {
         if (pendingAvat != 0) {
-            farmingFactory.mintTokens(msg.sender, pendingAvat);
+            uint256 senderAmount = pendingAvat * REWARDS_FEE / 1000;
+
+            farmingFactory.mintTokens(msg.sender, senderAmount);
+            farmingFactory.mintTokens(address(farmingFactory), pendingAvat - senderAmount);
         }
 
         if (pendingBonus != 0) {
@@ -209,11 +223,18 @@ contract Farming is OwnableUpgradeable {
         uint256 amount_
     ) internal {
         uint256 balance = token_.balanceOf(address(this));
+        
 
         if (amount_ > balance) {
-            token_.safeTransfer(to_, balance);
+            uint256 senderAmount = balance * REWARDS_FEE / 1000;
+
+            token_.safeTransfer(to_, senderAmount);
+            token_.safeTransfer(address(farmingFactory), balance - senderAmount);
         } else {
-            token_.safeTransfer(to_, amount_);
+            uint256 senderAmount = amount_ * REWARDS_FEE / 1000;
+
+            token_.safeTransfer(to_, senderAmount);
+            token_.safeTransfer(address(farmingFactory), amount_ - senderAmount);
         }
     }
 
