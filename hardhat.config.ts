@@ -50,7 +50,7 @@ const config: HardhatUserConfig = {
         },
         avalanche: {
             url: "https://api.avax.network/ext/bc/C/rpc",
-            accounts: [process.env.AVALANCHE_PK || ''],
+            accounts: [process.env.AVALANCHE_PK || ""],
         },
         fuji: {
             url: "https://api.avax-test.network/ext/bc/C/rpc",

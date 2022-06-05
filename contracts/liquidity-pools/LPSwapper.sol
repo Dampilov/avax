@@ -23,7 +23,7 @@ contract LPSwapper is Ownable {
     /// @notice WAVAX address
     address private immutable wavax;
 
-    /// @notice ERC20 Token to be received 
+    /// @notice ERC20 Token to be received
     address public tokenOut;
 
     /// @notice Set of addresses that can perform certain functions
@@ -36,14 +36,7 @@ contract LPSwapper is Ownable {
     event SetTokenOut(address indexed token);
     event RemoveAdmin(address indexed admin);
     event SetBridge(address indexed token, address indexed oldBridge, address indexed bridge);
-    event Convert(
-        address indexed server,
-        address indexed token0,
-        address indexed token1,
-        uint256 amount0,
-        uint256 amount1,
-        uint256 amountOut
-    );
+    event Convert(address indexed server, address indexed token0, address indexed token1, uint256 amount0, uint256 amount1, uint256 amountOut);
 
     modifier onlyAdmin() {
         require(_admins.contains(_msgSender()), "not an admin");
@@ -56,10 +49,7 @@ contract LPSwapper is Ownable {
         _;
     }
 
-    constructor(
-        address factory_,
-        address wavax_
-    ) {
+    constructor(address factory_, address wavax_) {
         require(factory_ != address(0), "C0");
         require(wavax_ != address(0), "C1");
         factory = ILPFactory(factory_);
@@ -241,24 +231,10 @@ contract LPSwapper is Ownable {
             address bridge1 = bridgeFor(token1);
             if (bridge0 == token1) {
                 // eg. MIC - USDT - and bridgeFor(MIC) = USDT
-                amountOut = _convertStep(
-                    bridge0,
-                    token1,
-                    _swap(token0, bridge0, amount0, address(this), slippage),
-                    amount1,
-                    receiver,
-                    slippage
-                );
+                amountOut = _convertStep(bridge0, token1, _swap(token0, bridge0, amount0, address(this), slippage), amount1, receiver, slippage);
             } else if (bridge1 == token0) {
                 // eg. WBTC - DSD - and bridgeFor(DSD) = WBTC
-                amountOut = _convertStep(
-                    token0,
-                    bridge1,
-                    amount0,
-                    _swap(token1, bridge1, amount1, address(this), slippage),
-                    receiver,
-                    slippage
-                );
+                amountOut = _convertStep(token0, bridge1, amount0, _swap(token1, bridge1, amount1, address(this), slippage), receiver, slippage);
             } else {
                 amountOut = _convertStep(
                     bridge0,
@@ -295,9 +271,7 @@ contract LPSwapper is Ownable {
         require(address(pair) != address(0), "no pair found");
 
         (uint256 reserve0, uint256 reserve1, ) = pair.getReserves();
-        (uint256 reserveInput, uint256 reserveOutput) = fromToken == pair.token0()
-            ? (reserve0, reserve1)
-            : (reserve1, reserve0);
+        (uint256 reserveInput, uint256 reserveOutput) = fromToken == pair.token0() ? (reserve0, reserve1) : (reserve1, reserve0);
         IERC20(fromToken).safeTransfer(address(pair), amountIn);
         uint256 amountInput = IERC20(fromToken).balanceOf(address(pair)) - reserveInput; // calculate amount that was transferred, this accounts for transfer taxes
 
@@ -308,16 +282,10 @@ contract LPSwapper is Ownable {
             /// @dev We simulate the amount received if we did a swapIn and swapOut without updating the reserves,
             /// hence why we do rest^2, i.e. calculating the slippage twice cause we actually do two swaps.
             /// This allows us to catch if a pair has low liquidity
-            require(
-                LPLibrary.getAmountOut(amountOut, reserveOutput, reserveInput) >=
-                    amountInput * rest * rest / 100_000_000,
-                "slippage caught"
-            );
+            require(LPLibrary.getAmountOut(amountOut, reserveOutput, reserveInput) >= (amountInput * rest * rest) / 100_000_000, "slippage caught");
         }
 
-        (uint256 amount0Out, uint256 amount1Out) = fromToken == pair.token0()
-            ? (uint256(0), amountOut)
-            : (amountOut, uint256(0));
+        (uint256 amount0Out, uint256 amount1Out) = fromToken == pair.token0() ? (uint256(0), amountOut) : (amountOut, uint256(0));
         pair.swap(amount0Out, amount1Out, to, new bytes(0));
     }
 

@@ -57,7 +57,7 @@ contract Farming is OwnableUpgradeable, ReentrancyGuard {
     uint256 public constant ATPS_PRECISION = 1e36;
 
     /// @notice Fee percent equals 0.5%
-    uint256 public constant REWARDS_FEE = 995; 
+    uint256 public constant REWARDS_FEE = 995;
 
     event Deposit(address indexed user, uint256 amount);
     event Withdraw(address indexed user, uint256 amount);
@@ -142,7 +142,7 @@ contract Farming is OwnableUpgradeable, ReentrancyGuard {
         updatePool();
 
         // gas saving
-        uint _userAmount = user.amount;
+        uint256 _userAmount = user.amount;
 
         if (_userAmount > 0) {
             uint256 pendingAvat = _userAmount.mul(accAvatTokenPerShare).div(ATPS_PRECISION).sub(user.rewardAvatTokenDebt);
@@ -167,7 +167,7 @@ contract Farming is OwnableUpgradeable, ReentrancyGuard {
         UserInfo storage user = userInfo[msg.sender];
 
         // gas saving
-        uint _userAmount = user.amount;
+        uint256 _userAmount = user.amount;
         require(_userAmount >= _amount, "W0");
 
         updatePool();
@@ -204,7 +204,7 @@ contract Farming is OwnableUpgradeable, ReentrancyGuard {
      */
     function _harvest(uint256 pendingAvat, uint256 pendingBonus) internal {
         if (pendingAvat != 0) {
-            uint256 senderAmount = pendingAvat * REWARDS_FEE / 1000;
+            uint256 senderAmount = (pendingAvat * REWARDS_FEE) / 1000;
 
             farmingFactory.mintTokens(msg.sender, senderAmount);
             farmingFactory.mintTokens(address(farmingFactory), pendingAvat - senderAmount);
@@ -223,15 +223,14 @@ contract Farming is OwnableUpgradeable, ReentrancyGuard {
         uint256 amount_
     ) internal {
         uint256 balance = token_.balanceOf(address(this));
-        
 
         if (amount_ > balance) {
-            uint256 senderAmount = balance * REWARDS_FEE / 1000;
+            uint256 senderAmount = (balance * REWARDS_FEE) / 1000;
 
             token_.safeTransfer(to_, senderAmount);
             token_.safeTransfer(address(farmingFactory), balance - senderAmount);
         } else {
-            uint256 senderAmount = amount_ * REWARDS_FEE / 1000;
+            uint256 senderAmount = (amount_ * REWARDS_FEE) / 1000;
 
             token_.safeTransfer(to_, senderAmount);
             token_.safeTransfer(address(farmingFactory), amount_ - senderAmount);

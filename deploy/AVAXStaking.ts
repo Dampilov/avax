@@ -16,10 +16,7 @@ module.exports = async function (hre: HardhatRuntimeEnvironment) {
             execute: {
                 init: {
                     methodName: "initialize",
-                    args: [
-                        wavaxAddress,
-                        depositFeePrecision,
-                    ],
+                    args: [wavaxAddress, depositFeePrecision],
                 },
             },
         },
@@ -32,9 +29,9 @@ module.exports = async function (hre: HardhatRuntimeEnvironment) {
         // IERC20Upgradeable _depositToken,
         const depositToken = (await deployments.get("AvatToken")).address
         // uint256 _allocPoint,
-        const allocPoint = ethers.utils.parseUnits('10', 12)
+        const allocPoint = ethers.utils.parseUnits("10", 12)
         // uint256 _depositFeePercent,
-        const depositFeePercent = 50 // 0.5% 
+        const depositFeePercent = 50 // 0.5%
         // uint256 tokenBlockTime,
         const tokenBlockTime = 600 // default: 604800
         // bool _withUpdate
@@ -43,7 +40,6 @@ module.exports = async function (hre: HardhatRuntimeEnvironment) {
         const addPoolTx = await (await staking.add(depositToken, allocPoint, depositFeePercent, tokenBlockTime, withUpdate)).wait()
         console.log(`add AVAT staking to AVAX staking (tx: ${addPoolTx.transactionHash})`)
     }
-
 }
 
 module.exports.tags = ["AVAXStaking"]

@@ -66,12 +66,9 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
     event Withdraw(address indexed user, uint256 indexed pid, uint256 indexed stakeIndex, uint256 withdrawAmount, uint256 rewardAmount);
     event Collect(address indexed user, uint256 indexed pid, uint256 indexed stakeIndex, uint256 amount);
     event SetDepositFee(uint256 depositFeePercent);
-    event ClaimCollectedFees(uint amount);
+    event ClaimCollectedFees(uint256 amount);
 
-    function initialize(
-        IERC20Upgradeable _wavax,
-        uint _depositFeePrecision
-    ) public initializer {
+    function initialize(IERC20Upgradeable _wavax, uint256 _depositFeePrecision) public initializer {
         __Ownable_init();
         __Pausable_init();
 
@@ -80,7 +77,7 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
         require(_depositFeePrecision >= 100, "I0");
         DEPOSIT_FEE_PRECISION = _depositFeePrecision;
 
-        require(address(_wavax)  != address(0x0), "I1");
+        require(address(_wavax) != address(0x0), "I1");
         wavax = _wavax;
     }
 
@@ -106,10 +103,7 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
     /**
      * @notice Deposit tokens
      */
-    function deposit(
-        uint256 _pid,
-        uint256 _amount
-    ) public whenNotPaused {
+    function deposit(uint256 _pid, uint256 _amount) public whenNotPaused {
         require(_amount > 0, "D0");
         require(_pid < poolInfo.length, "D1");
 
@@ -118,14 +112,14 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
 
         uint256 depositAmount = _amount;
 
-        uint256 depositFee = _amount * pool.depositFeePercent / DEPOSIT_FEE_PRECISION;
+        uint256 depositFee = (_amount * pool.depositFeePercent) / DEPOSIT_FEE_PRECISION;
         depositAmount = _amount - depositFee;
 
         pool.depositFeeCollected = pool.depositFeeCollected + depositAmount;
 
         // Update pool including fee for people staking
         updatePool(_pid);
-        
+
         // Add deposit to total deposits
         pool.totalDeposits = pool.totalDeposits + depositAmount;
 
@@ -148,7 +142,7 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
         // Update user's total amount
         user.totalAmount = user.totalAmount + depositAmount;
         // Compute reward debt
-        stake.rewardDebt = stake.amount * pool.accTokenPerShare / ACC_REWARD_PER_SHARE_PRECISION;
+        stake.rewardDebt = (stake.amount * pool.accTokenPerShare) / ACC_REWARD_PER_SHARE_PRECISION;
         // Set lockup time
         stake.tokensUnlockTime = block.timestamp + pool.tokenBlockTime;
 
@@ -179,7 +173,7 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
         updatePool(_pid);
 
         // Compute user's pending amount
-        uint256 pendingAmount = stake.amount * pool.accTokenPerShare / ACC_REWARD_PER_SHARE_PRECISION - stake.rewardDebt;
+        uint256 pendingAmount = (stake.amount * pool.accTokenPerShare) / ACC_REWARD_PER_SHARE_PRECISION - stake.rewardDebt;
 
         // Transfer pending amount to user
         _safeTransferReward(msg.sender, pendingAmount);
@@ -187,7 +181,7 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
         user.totalAmount = user.totalAmount - amount;
 
         stake.amount = 0;
-        stake.rewardDebt = stake.amount * pool.accTokenPerShare / ACC_REWARD_PER_SHARE_PRECISION;
+        stake.rewardDebt = (stake.amount * pool.accTokenPerShare) / ACC_REWARD_PER_SHARE_PRECISION;
 
         // Transfer withdrawal amount to user (with fee being withdrawalFeeDepositAmount)
         pool.depositToken.safeTransfer(address(msg.sender), amount);
@@ -221,12 +215,12 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
         updatePool(_pid);
 
         // Compute user's pending amount
-        uint256 pendingAmount = stake.amount * pool.accTokenPerShare / ACC_REWARD_PER_SHARE_PRECISION - stake.rewardDebt;
+        uint256 pendingAmount = (stake.amount * pool.accTokenPerShare) / ACC_REWARD_PER_SHARE_PRECISION - stake.rewardDebt;
 
         // Transfer pending amount to user
         _safeTransferReward(msg.sender, pendingAmount);
         user.totalRewarded = user.totalRewarded + pendingAmount;
-        stake.rewardDebt = stake.amount * pool.accTokenPerShare / ACC_REWARD_PER_SHARE_PRECISION;
+        stake.rewardDebt = (stake.amount * pool.accTokenPerShare) / ACC_REWARD_PER_SHARE_PRECISION;
 
         emit Collect(msg.sender, _pid, _stakeId, pendingAmount);
     }
@@ -245,22 +239,22 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
 
     /**
      * @notice Claim all collected fees and send them to the recipient. Can only be called by the owner.
-     * 
+     *
      * @param _pid pool id
      * @param _recipient address which receives collected fees
      */
     function claimCollectedFees(uint256 _pid, address _recipient) external onlyOwner {
         PoolInfo storage pool = poolInfo[_pid];
 
-        uint amountToCollect = pool.depositFeeCollected;
+        uint256 amountToCollect = pool.depositFeeCollected;
         pool.depositFeeCollected = 0;
-        
+
         pool.depositToken.transfer(_recipient, amountToCollect);
         emit ClaimCollectedFees(amountToCollect);
     }
 
     /**
-     * @notice Update the given pool's ERC20 allocation point. Can only be called by the owner. 
+     * @notice Update the given pool's ERC20 allocation point. Can only be called by the owner.
      * Always prefer to call with _withUpdate set to true.
      */
     function setAllocation(
@@ -363,11 +357,10 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
 
         if (currentRewardBalance != lastRewardBalance && depositTokenSupply != 0) {
             uint256 _accruedReward = currentRewardBalance - lastRewardBalance;
-            _accTokenPerShare = _accTokenPerShare + 
-                _accruedReward * pool.allocPoint / totalAllocPoint * ACC_REWARD_PER_SHARE_PRECISION / depositTokenSupply;
+            _accTokenPerShare = _accTokenPerShare + (((_accruedReward * pool.allocPoint) / totalAllocPoint) * ACC_REWARD_PER_SHARE_PRECISION) / depositTokenSupply;
         }
 
-        return stake.amount * _accTokenPerShare / ACC_REWARD_PER_SHARE_PRECISION - stake.rewardDebt;
+        return (stake.amount * _accTokenPerShare) / ACC_REWARD_PER_SHARE_PRECISION - stake.rewardDebt;
     }
 
     /**
@@ -417,8 +410,7 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
 
         uint256 _accruedReward = currentRewardBalance - lastRewardBalance;
 
-        pool.accTokenPerShare = pool.accTokenPerShare + 
-            _accruedReward * pool.allocPoint / totalAllocPoint * ACC_REWARD_PER_SHARE_PRECISION / depositTokenSupply;
+        pool.accTokenPerShare = pool.accTokenPerShare + (((_accruedReward * pool.allocPoint) / totalAllocPoint) * ACC_REWARD_PER_SHARE_PRECISION) / depositTokenSupply;
 
         lastRewardBalance = currentRewardBalance;
     }
