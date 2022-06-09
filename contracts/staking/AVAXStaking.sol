@@ -5,6 +5,8 @@ import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+
+import "./interfaces/IWAVAX.sol";
 import "./interfaces/IAdmin.sol";
 import "./interfaces/IDistribution.sol";
 
@@ -38,6 +40,10 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
         uint256 uniqueUsers; // How many unique users there are in the pool
     }
 
+    receive() external payable {
+        assert(msg.sender == address(wavax)); // only accept AVAX via fallback from the WAVAX contract
+    }
+
     // Deposit fee precision for math calculations
     uint256 public DEPOSIT_FEE_PRECISION;
 
@@ -45,7 +51,7 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
     uint256 public ACC_REWARD_PER_SHARE_PRECISION;
 
     // WAVAX address
-    IERC20Upgradeable public wavax;
+    IWAVAX public wavax;
 
     // Last reward balance of WAVAX tokens
     uint256 public lastRewardBalance;
@@ -68,7 +74,7 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
     event SetDepositFee(uint256 depositFeePercent);
     event ClaimCollectedFees(uint256 amount);
 
-    function initialize(IERC20Upgradeable _wavax, uint256 _depositFeePrecision) public initializer {
+    function initialize(IWAVAX _wavax, uint256 _depositFeePrecision) public initializer {
         __Ownable_init();
         __Pausable_init();
 
@@ -183,7 +189,6 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
         stake.amount = 0;
         stake.rewardDebt = (stake.amount * pool.accTokenPerShare) / ACC_REWARD_PER_SHARE_PRECISION;
 
-        // Transfer withdrawal amount to user (with fee being withdrawalFeeDepositAmount)
         pool.depositToken.safeTransfer(address(msg.sender), amount);
         pool.totalDeposits = pool.totalDeposits - amount;
 
@@ -398,7 +403,7 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
      *
      * @param _pid pool id
      */
-    function updatePool(uint256 _pid) internal {
+    function updatePool(uint256 _pid) public {
         PoolInfo storage pool = poolInfo[_pid];
 
         uint256 depositTokenSupply = pool.totalDeposits;
@@ -428,12 +433,14 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
             lastRewardBalance = lastRewardBalance - wavaxBalance;
             paidOut += wavaxBalance;
 
-            wavax.safeTransfer(_to, wavaxBalance);
+            wavax.withdraw(wavaxBalance);
+            payable(_to).transfer(wavaxBalance);
         } else {
             lastRewardBalance = lastRewardBalance - wavaxBalance;
             paidOut += _amount;
 
-            wavax.safeTransfer(_to, _amount);
+            wavax.withdraw(_amount);
+            payable(_to).transfer(_amount);
         }
     }
 }
