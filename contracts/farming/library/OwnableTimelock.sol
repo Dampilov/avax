@@ -17,7 +17,7 @@ abstract contract OwnableTimelock is Context {
      */
     constructor() {
         _transferOwnership(_msgSender());
-        transferOwnershipDelay = 0; // 24 hours in seconds
+        transferOwnershipDelay = 86400; // 24 hours in seconds
         timelockEnabled = false;
     }
 
