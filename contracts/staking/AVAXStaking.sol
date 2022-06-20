@@ -30,7 +30,7 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
     }
 
     /// @notice Address of ERC20 deposit token contract.
-    IERC20Upgradeable public depositToken; 
+    IERC20Upgradeable public depositToken;
 
     /// @notice Accumulated ERC20s per share, times 1e36.
     uint256 accTokenPerShare;
@@ -39,16 +39,16 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
     uint256 totalDeposits;
 
     /// @notice Percent of deposit fee, must be >= depositFeePrecision / 100 and less than depositFeePrecision
-    uint256 depositFeePercent; 
+    uint256 depositFeePercent;
 
     /// @notice Amount of the deposit fee collected and ready to claim by the owner
     uint256 depositFeeCollected;
 
     /// @notice Token block time in seconds
-    uint256 tokenBlockTime; 
+    uint256 tokenBlockTime;
 
     /// @notice How many unique users there are in the pool
-    uint256 uniqueUsers; 
+    uint256 uniqueUsers;
 
     /// @notice Deposit fee precision for math calculations
     uint256 public DEPOSIT_FEE_PRECISION;
@@ -264,10 +264,7 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
     /**
      * @notice Return user's specific stake
      */
-    function getUserStake(
-        address _user,
-        uint256 _stakeId
-    ) public view returns (StakeRecord memory) {
+    function getUserStake(address _user, uint256 _stakeId) public view returns (StakeRecord memory) {
         UserInfo storage user = userInfo[_user];
         require(user.stakes[_stakeId].id == _stakeId, "Stake with this id does not exist");
         return user.stakes[_stakeId];
@@ -284,10 +281,7 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
     /**
      * @notice View function to see deposited tokens for a particular user's stake.
      */
-    function deposited(
-        address _user,
-        uint256 _stakeId
-    ) public view returns (uint256) {
+    function deposited(address _user, uint256 _stakeId) public view returns (uint256) {
         UserInfo storage user = userInfo[_user];
         StakeRecord storage stake = user.stakes[_stakeId];
         require(stake.id == _stakeId, "Stake with this id does not exist");
@@ -303,10 +297,7 @@ contract AVAXStaking is OwnableUpgradeable, PausableUpgradeable {
     /**
      * @notice View function to see pending rewards for a user's stake.
      */
-    function pending(
-        address _user,
-        uint256 _stakeId
-    ) public view returns (uint256) {
+    function pending(address _user, uint256 _stakeId) public view returns (uint256) {
         UserInfo storage user = userInfo[_user];
 
         StakeRecord storage stake = user.stakes[_stakeId];
