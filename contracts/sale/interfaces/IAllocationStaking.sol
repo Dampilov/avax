@@ -1,6 +1,0 @@
-// SPDX-License-Identifier: UNLICENSED
-pragma solidity 0.8.12;
-
-interface IAllocationStaking {
-    function getiAVATAmount(address _user) external view returns (uint256 iavat);
-}
